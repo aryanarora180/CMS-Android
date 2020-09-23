@@ -171,8 +171,21 @@ public class CourseRequestHandler {
         return null;
     }
 
-    public void getCourseData(int courseId, @Nullable final CallBack<List<CourseSection>> callBack) {
+    @NotNull
+    public List<CourseSection> getCourseDataSync(int courseId) {
+        Call<List<CourseSection>> courseCall = moodleServices
+                .fetchCourseContent(userAccount.getToken(), courseId);
+        try {
+            Response<List<CourseSection>> response = courseCall.execute();
+            List<CourseSection> responseCourseSections = response.body();
+            if (responseCourseSections == null) return new ArrayList<>(0);
+            return resolve(responseCourseSections);
+        } catch (Exception e){
+            return new ArrayList<>(0);
+        }
+    }
 
+    public void getCourseData(int courseId, @Nullable final CallBack<List<CourseSection>> callBack) {
         Call<List<CourseSection>> courseCall = moodleServices.fetchCourseContent(userAccount.getToken(), courseId);
         courseCall.enqueue(new Callback<List<CourseSection>>() {
             @Override
@@ -211,6 +224,18 @@ public class CourseRequestHandler {
         return null;
     }
 
+
+    @NotNull
+    public List<Discussion> getForumDicussionsSync(int moduleId) {
+        Call<ForumData> call = moodleServices.getForumDiscussions(userAccount.getToken(), moduleId, 0, 0);
+        try {
+            Response<ForumData> response = call.execute();
+            if (response.body() == null) return new ArrayList<>(0);
+            return response.body().getDiscussions();
+        } catch (Exception e) {
+            return new ArrayList<>(0);
+        }
+    }
 
     public void getForumDiscussions(int moduleId, @Nullable final CallBack<List<Discussion>> callBack) {
         Call<ForumData> call = moodleServices.getForumDiscussions(userAccount.getToken(), moduleId, 0, 0);

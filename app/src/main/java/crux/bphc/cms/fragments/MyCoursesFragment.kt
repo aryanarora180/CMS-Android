@@ -29,12 +29,15 @@ import crux.bphc.cms.interfaces.ClickListener
 import crux.bphc.cms.models.course.Course
 import crux.bphc.cms.models.course.CourseSection
 import crux.bphc.cms.models.course.Module
-import crux.bphc.cms.models.forum.Discussion
 import crux.bphc.cms.utils.UserUtils
 import io.realm.Realm
 import kotlinx.android.synthetic.main.fragment_my_courses.*
 import kotlinx.android.synthetic.main.row_course.*
 import kotlinx.android.synthetic.main.row_course.view.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 import java.util.*
 import kotlin.collections.ArrayList
@@ -159,25 +162,25 @@ class MyCoursesFragment : Fragment() {
 
       swipeRefreshLayout.setOnRefreshListener {
             swipeRefreshLayout.isRefreshing = true
-            makeRequest()
+            refreshCourses()
         }
 
         checkEmpty()
-        if (courses.isEmpty()) {
-            swipeRefreshLayout.isRefreshing = true
-            makeRequest()
-        }
+//        if (courses.isEmpty()) {
+//            swipeRefreshLayout.isRefreshing = true
+//            refreshCourses()
+//        }
     }
 
     private fun checkEmpty() {
         if (courses.isEmpty()) {
-            empty!!.visibility = View.VISIBLE
+            empty.visibility = View.VISIBLE
         } else {
-            empty!!.visibility = View.GONE
+            empty.visibility = View.GONE
         }
     }
 
-    private fun makeRequest() {
+    private fun refreshCourses() {
         val courseRequestHandler = CourseRequestHandler(activity)
         courseRequestHandler.getCourseList(object : CallBack<List<Course>> {
             override fun onResponse(courseList: List<Course>) {
@@ -203,63 +206,55 @@ class MyCoursesFragment : Fragment() {
         })
     }
 
-    private fun updateCourseContent(courses: List<Course>?) {
-        courseDataHandler.replaceCourses(courses!!)
+    private fun updateCourseContent(courses: List<Course>) {
+        courseDataHandler.replaceCourses(courses)
         val courseRequestHandler = CourseRequestHandler(activity)
-        coursesUpdated = 0
-        if (courses.isEmpty()) swipeRefreshLayout.isRefreshing = false
-        for (course in courses) {
-            courseRequestHandler.getCourseData(course.courseId,
-                    object : CallBack<List<CourseSection?>?> {
-                        override fun onResponse(sections: List<CourseSection?>?) {
-                            if (sections == null) return
-                            for (courseSection in sections) {
-                                val modules = courseSection?.modules ?: continue
-                                for (module in modules) {
-                                    if (module.modType == Module.Type.FORUM) {
-                                        courseRequestHandler.getForumDiscussions(module.instance, object : CallBack<List<Discussion?>?> {
-                                            override fun onResponse(responseObject: List<Discussion?>?) {
-                                                if (responseObject != null) {
-                                                    for (d in responseObject) {
-                                                        d?.setForumId(module.instance)
-                                                    }
-                                                }
-                                                val newDiscussions = courseDataHandler.setForumDiscussions(module.instance, responseObject)
-                                                if (newDiscussions.size > 0) courseDataHandler.markModuleAsReadOrUnread(module, true)
-                                            }
+        if (courses.isEmpty()) { swipeRefreshLayout.isRefreshing = false; return }
+        CoroutineScope(Dispatchers.Default).launch {
+            val updated = courses.map map@ {
+                val promise = async innerAsync@{
+                    val sections = courseRequestHandler.getCourseDataSync(it.courseId)
+                    val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
+                    val courseDataHandler = CourseDataHandler(requireContext(), realm)
 
-                                            override fun onFailure(message: String, t: Throwable) {
-                                                swipeRefreshLayout.isRefreshing = false
-                                            }
-                                        })
-                                    }
+                    for (courseSection in sections) {
+                        if (courseSection == null) continue
+                        val modules = courseSection.modules
+                        for (module in modules) {
+                            if (module.modType == Module.Type.FORUM) {
+                                val discussions = courseRequestHandler
+                                        .getForumDicussionsSync(module.instance)
+                                for (d in discussions) {
+                                    d.setForumId(module.instance)
                                 }
                             }
-                            val newPartsInSections = sections.let {
-                                courseDataHandler
-                                        .isolateNewCourseData(course.courseId, it)
-                            }
-                            sections.let { courseDataHandler.replaceCourseData(course.courseId, it) }
-                            if (newPartsInSections?.isNotEmpty() == true) {
-                                coursesUpdated++
-                            }
-                            //Refresh the recycler view for the last course
-                            if (course.courseId == courses[courses.size - 1].courseId) {
-                                swipeRefreshLayout.isRefreshing = false
-                                mAdapter.notifyDataSetChanged()
-                                val message: String = if (coursesUpdated == 0) {
-                                    getString(R.string.upToDate)
-                                } else {
-                                    resources.getQuantityString(R.plurals.noOfCoursesUpdated, coursesUpdated, coursesUpdated)
-                                }
-                                Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
-                            }
                         }
+                    }
 
-                        override fun onFailure(message: String, t: Throwable) {
-                            swipeRefreshLayout.isRefreshing = false
-                        }
-                    })
+                    val newPartsInSections = courseDataHandler
+                            .isolateNewCourseData(it.courseId, sections)
+                    courseDataHandler.replaceCourseData(it.courseId, sections)
+
+                    realm.close() // let's not forget to do this
+                    if (newPartsInSections.isNotEmpty()) {
+                        return@innerAsync true
+                    }
+                    return@innerAsync false
+                }
+                if (promise.await()) 1 else 0
+            }
+            coursesUpdated = updated.fold(0) { i, x -> i + x }
+
+            CoroutineScope(Dispatchers.Main).launch {
+                swipeRefreshLayout.isRefreshing = false
+                mAdapter.notifyDataSetChanged()
+                val message: String = if (coursesUpdated == 0) {
+                    getString(R.string.upToDate)
+                } else {
+                    resources.getQuantityString(R.plurals.noOfCoursesUpdated, coursesUpdated, coursesUpdated)
+                }
+                Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
@@ -336,7 +331,7 @@ class MyCoursesFragment : Fragment() {
                 MaterialAlertDialogBuilder(context)
                         .setTitle("Confirm Download")
                         .setMessage("Are you sure you want to all the contents of this course?")
-                        .setPositiveButton("Yes") { _: DialogInterface?, i: Int ->
+                        .setPositiveButton("Yes") { _: DialogInterface?, _: Int ->
                             if (downloadClickListener != null) {
                                 val pos = layoutPosition
                                 if (!downloadClickListener!!.onClick(this@MyCoursesFragment.courses[pos], pos)) {
@@ -415,8 +410,6 @@ class MyCoursesFragment : Fragment() {
     companion object {
         private const val COURSE_SECTION_ACTIVITY = 105
         @JvmStatic
-        fun newInstance(): MyCoursesFragment {
-            return MyCoursesFragment()
-        }
+        fun newInstance() = MyCoursesFragment()
     }
 }
