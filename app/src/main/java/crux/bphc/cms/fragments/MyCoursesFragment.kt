@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
+import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -21,11 +22,11 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import crux.bphc.cms.R
 import crux.bphc.cms.activities.CourseDetailActivity
+import crux.bphc.cms.exceptions.InvalidTokenException
 import crux.bphc.cms.fragments.MoreOptionsFragment.OptionsViewModel
 import crux.bphc.cms.helper.CourseDataHandler
 import crux.bphc.cms.helper.CourseDownloader
 import crux.bphc.cms.helper.CourseRequestHandler
-import crux.bphc.cms.helper.CourseRequestHandler.CallBack
 import crux.bphc.cms.interfaces.ClickListener
 import crux.bphc.cms.models.course.Course
 import crux.bphc.cms.models.course.CourseSection
@@ -35,10 +36,8 @@ import io.realm.Realm
 import kotlinx.android.synthetic.main.fragment_my_courses.*
 import kotlinx.android.synthetic.main.row_course.*
 import kotlinx.android.synthetic.main.row_course.view.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import java.io.IOException
 import java.text.DecimalFormat
 import java.util.*
 import kotlin.collections.ArrayList
@@ -165,10 +164,6 @@ class MyCoursesFragment : Fragment() {
         }
 
         checkEmpty()
-//        if (courses.isEmpty()) {
-//            swipeRefreshLayout.isRefreshing = true
-//            refreshCourses()
-//        }
     }
 
     private fun checkEmpty() {
@@ -182,44 +177,50 @@ class MyCoursesFragment : Fragment() {
     private fun refreshCourses() {
         val courseRequestHandler = CourseRequestHandler(activity)
         CoroutineScope(Dispatchers.IO).launch {
-            courseRequestHandler.getCourseListSync(object : CallBack<List<Course>> {
-                override fun onResponse(courseList: List<Course>) {
-                    val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
-                    val courseDataHandler = CourseDataHandler(requireContext(), realm)
-                    courses.clear()
-                    courses.addAll(courseList)
-                    courseDataHandler.replaceCourses(courseList)
-                    checkEmpty()
-                    updateCourseContent()
-                    realm.close()
-                }
-
-                override fun onFailure(message: String, t: Throwable) {
-                    swipeRefreshLayout.isRefreshing = false
-                    CoroutineScope(Dispatchers.Main).launch {
-                        Toast.makeText(requireActivity(), "Error: {message}", Toast.LENGTH_SHORT).show()
-                        if (message.contains("Invalid token")) {
-                            UserUtils.logout(requireActivity())
-                            UserUtils.clearBackStackAndLaunchTokenActivity(requireActivity())
-                        }
+            try {
+                val courseList = courseRequestHandler.fetchCourseListSync()
+                courses.clear()
+                courses.addAll(courseList)
+                val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
+                val courseDataHandler = CourseDataHandler(requireContext(), realm)
+                courseDataHandler.replaceCourses(courseList)
+                realm.close()
+                checkEmpty()
+                updateCourseContent()
+            } catch (e : Exception) {
+                Log.e(TAG, "", e)
+                CoroutineScope(Dispatchers.Main).launch {
+                    Toast.makeText(requireActivity(), "Error: ${e.message}", Toast.LENGTH_SHORT).show()
+                    if (e is InvalidTokenException) {
+                        UserUtils.logout(requireActivity())
+                        UserUtils.clearBackStackAndLaunchTokenActivity(requireActivity())
                     }
                 }
-            })
+            } finally {
+                CoroutineScope(Dispatchers.Main).launch {
+                    swipeRefreshLayout.isRefreshing = false
+                }
+            }
         }
     }
 
-    private fun updateCourseContent() {
-        val courseRequestHandler = CourseRequestHandler(activity)
-        if (courses.isEmpty()) { swipeRefreshLayout.isRefreshing = false; return }
-        CoroutineScope(Dispatchers.IO).launch {
-            val updated = courses.map map@ {
-                val promise = async innerAsync@{
-                    val sections = courseRequestHandler.getCourseDataSync(it.courseId)
+    private suspend fun updateCourseContent() {
+        coroutineScope {
+            val courseRequestHandler = CourseRequestHandler(requireActivity())
+            val promises = courses.map map@ {
+                async innerAsync@{
+                    val sections: MutableList<CourseSection>
+                    try {
+                        sections = courseRequestHandler.getCourseDataSync(it.courseId)
+                    } catch (e: IOException) {
+                        Log.e(TAG, "IOException when syncing course: ${it.courseId}}", e)
+                        return@innerAsync false
+                    }
+
                     val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
                     val courseDataHandler = CourseDataHandler(requireContext(), realm)
 
                     for (courseSection in sections) {
-                        if (courseSection == null) continue
                         val modules = courseSection.modules
                         for (module in modules) {
                             if (module.modType == Module.Type.FORUM) {
@@ -242,9 +243,8 @@ class MyCoursesFragment : Fragment() {
                     }
                     return@innerAsync false
                 }
-                if (promise.await()) 1 else 0
             }
-            coursesUpdated = updated.fold(0) { i, x -> i + x }
+            coursesUpdated = promises.awaitAll().fold(0) {i, x -> if (x) i + 1 else i }
 
             CoroutineScope(Dispatchers.Main).launch {
                 swipeRefreshLayout.isRefreshing = false
@@ -252,7 +252,8 @@ class MyCoursesFragment : Fragment() {
                 val message: String = if (coursesUpdated == 0) {
                     getString(R.string.upToDate)
                 } else {
-                    resources.getQuantityString(R.plurals.noOfCoursesUpdated, coursesUpdated, coursesUpdated)
+                    resources.getQuantityString(R.plurals.noOfCoursesUpdated, coursesUpdated,
+                            coursesUpdated)
                 }
                 Toast.makeText(activity, message, Toast.LENGTH_SHORT).show()
             }
@@ -411,5 +412,7 @@ class MyCoursesFragment : Fragment() {
     companion object {
         @JvmStatic
         fun newInstance() = MyCoursesFragment()
+        @JvmStatic
+        val TAG = "MyCoursesFragment"
     }
 }

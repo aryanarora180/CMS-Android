@@ -7,6 +7,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.google.android.gms.tasks.RuntimeExecutionException;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.google.gson.reflect.TypeToken;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.TreeSet;
 
+import crux.bphc.cms.exceptions.InvalidTokenException;
 import crux.bphc.cms.models.UserAccount;
 import crux.bphc.cms.network.MoodleServices;
 import okhttp3.ResponseBody;
@@ -34,6 +36,7 @@ import crux.bphc.cms.models.course.CourseSection;
 import crux.bphc.cms.models.course.Module;
 import crux.bphc.cms.models.forum.Discussion;
 import crux.bphc.cms.models.forum.ForumData;
+import retrofit2.http.HTTP;
 
 import static crux.bphc.cms.app.Constants.API_URL;
 
@@ -62,34 +65,32 @@ public class CourseRequestHandler {
         moodleServices = retrofit.create(MoodleServices.class);
     }
 
-    public void getCourseListSync(@NotNull final CallBack<List<Course>> callBack) {
+    public List<Course> fetchCourseListSync() throws IOException, RuntimeException, InvalidTokenException {
         // TODO this function is like #getCourseList(Context context)
         // This method is superior since we don't have to handle Contexts or display messages to the
         // user. Let the caller handle that using a callback they provide.
         Call<ResponseBody> courseCall = moodleServices.fetchCourses(userAccount.getToken(), userAccount.getUserID());
         try {
             Response<ResponseBody> response = courseCall.execute();
-            if (response.code() != 200) {
-                callBack.onFailure("Server error", new HttpException(response));
-                return;
+            if (response.code() != 200) { // Moodle returns 200 for all API calls
+                HttpException e = new HttpException(response);
+                Log.e(TAG, "Response code not 200!", e);
+                throw e;
             }
 
             if (response.body() == null) {
-                callBack.onFailure("Null response body", new RuntimeException("Null response body"));
-                return;
+                throw new RuntimeException("Response body is null");
             }
 
             String responseString = response.body().string();
             if (responseString.contains("Invalid token")) {
-                callBack.onFailure("Invalid token", new RuntimeException("Invalid token"));
-                return;
+                throw new InvalidTokenException();
             }
             Gson gson = new Gson();
-            List<Course> courses= gson.fromJson(responseString, new TypeToken<List<Course>>() {}.getType());
-            callBack.onResponse(courses);
+            return gson.fromJson(responseString, new TypeToken<List<Course>>() {}.getType());
         } catch (IOException e) {
-            e.printStackTrace();
-            callBack.onFailure("Unexpected IO exception", e);
+            Log.e(TAG, "IOException when fetching Course List", e);
+            throw e;
         }
     }
 
@@ -204,17 +205,13 @@ public class CourseRequestHandler {
     }
 
     @NotNull
-    public List<CourseSection> getCourseDataSync(int courseId) {
+    public List<CourseSection> getCourseDataSync(int courseId) throws IOException {
         Call<List<CourseSection>> courseCall = moodleServices
                 .fetchCourseContent(userAccount.getToken(), courseId);
-        try {
-            Response<List<CourseSection>> response = courseCall.execute();
-            List<CourseSection> responseCourseSections = response.body();
-            if (responseCourseSections == null) return new ArrayList<>(0);
-            return resolve(responseCourseSections);
-        } catch (Exception e){
-            return new ArrayList<>(0);
-        }
+        Response<List<CourseSection>> response = courseCall.execute();
+        List<CourseSection> responseCourseSections = response.body();
+        if (responseCourseSections == null) return new ArrayList<>(0);
+        return resolve(responseCourseSections);
     }
 
     public void getCourseData(int courseId, @Nullable final CallBack<List<CourseSection>> callBack) {
