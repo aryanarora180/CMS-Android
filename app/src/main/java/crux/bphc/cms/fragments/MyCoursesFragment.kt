@@ -181,35 +181,37 @@ class MyCoursesFragment : Fragment() {
 
     private fun refreshCourses() {
         val courseRequestHandler = CourseRequestHandler(activity)
-        courseRequestHandler.getCourseList(object : CallBack<List<Course>> {
-            override fun onResponse(courseList: List<Course>) {
-                courses.clear()
-                courses.addAll(courseList)
-                courseDataHandler.replaceCourses(courseList)
-                checkEmpty()
-                updateCourseContent(courses)
-                mAdapter.filterCoursesByName(courseList, searchCourseET.text.toString())
-            }
-
-            override fun onFailure(message: String, t: Throwable) {
-                swipeRefreshLayout.isRefreshing = false
-                if (message.contains("Invalid token")) {
-                    Toast.makeText(activity, "Invalid token! Probably your token was reset.",
-                            Toast.LENGTH_SHORT).show()
-                    UserUtils.logout(requireActivity())
-                    UserUtils.clearBackStackAndLaunchTokenActivity(requireActivity())
-                    return
+        CoroutineScope(Dispatchers.IO).launch {
+            courseRequestHandler.getCourseListSync(object : CallBack<List<Course>> {
+                override fun onResponse(courseList: List<Course>) {
+                    val realm = Realm.getDefaultInstance() // tie a realm instance to this thread
+                    val courseDataHandler = CourseDataHandler(requireContext(), realm)
+                    courses.clear()
+                    courses.addAll(courseList)
+                    courseDataHandler.replaceCourses(courseList)
+                    checkEmpty()
+                    updateCourseContent()
+                    realm.close()
                 }
-                Toast.makeText(activity, "Unable to connect to server!", Toast.LENGTH_SHORT).show()
-            }
-        })
+
+                override fun onFailure(message: String, t: Throwable) {
+                    swipeRefreshLayout.isRefreshing = false
+                    CoroutineScope(Dispatchers.Main).launch {
+                        Toast.makeText(requireActivity(), "Error: {message}", Toast.LENGTH_SHORT).show()
+                        if (message.contains("Invalid token")) {
+                            UserUtils.logout(requireActivity())
+                            UserUtils.clearBackStackAndLaunchTokenActivity(requireActivity())
+                        }
+                    }
+                }
+            })
+        }
     }
 
-    private fun updateCourseContent(courses: List<Course>) {
-        courseDataHandler.replaceCourses(courses)
+    private fun updateCourseContent() {
         val courseRequestHandler = CourseRequestHandler(activity)
         if (courses.isEmpty()) { swipeRefreshLayout.isRefreshing = false; return }
-        CoroutineScope(Dispatchers.Default).launch {
+        CoroutineScope(Dispatchers.IO).launch {
             val updated = courses.map map@ {
                 val promise = async innerAsync@{
                     val sections = courseRequestHandler.getCourseDataSync(it.courseId)
@@ -246,7 +248,7 @@ class MyCoursesFragment : Fragment() {
 
             CoroutineScope(Dispatchers.Main).launch {
                 swipeRefreshLayout.isRefreshing = false
-                mAdapter.notifyDataSetChanged()
+                mAdapter.filterCoursesByName(courses, searchCourseET.text.toString())
                 val message: String = if (coursesUpdated == 0) {
                     getString(R.string.upToDate)
                 } else {

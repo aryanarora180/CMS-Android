@@ -24,6 +24,7 @@ import crux.bphc.cms.network.MoodleServices;
 import okhttp3.ResponseBody;
 import retrofit2.Call;
 import retrofit2.Callback;
+import retrofit2.HttpException;
 import retrofit2.Response;
 import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
@@ -59,6 +60,37 @@ public class CourseRequestHandler {
                 .addConverterFactory(GsonConverterFactory.create())
                 .build();
         moodleServices = retrofit.create(MoodleServices.class);
+    }
+
+    public void getCourseListSync(@NotNull final CallBack<List<Course>> callBack) {
+        // TODO this function is like #getCourseList(Context context)
+        // This method is superior since we don't have to handle Contexts or display messages to the
+        // user. Let the caller handle that using a callback they provide.
+        Call<ResponseBody> courseCall = moodleServices.fetchCourses(userAccount.getToken(), userAccount.getUserID());
+        try {
+            Response<ResponseBody> response = courseCall.execute();
+            if (response.code() != 200) {
+                callBack.onFailure("Server error", new HttpException(response));
+                return;
+            }
+
+            if (response.body() == null) {
+                callBack.onFailure("Null response body", new RuntimeException("Null response body"));
+                return;
+            }
+
+            String responseString = response.body().string();
+            if (responseString.contains("Invalid token")) {
+                callBack.onFailure("Invalid token", new RuntimeException("Invalid token"));
+                return;
+            }
+            Gson gson = new Gson();
+            List<Course> courses= gson.fromJson(responseString, new TypeToken<List<Course>>() {}.getType());
+            callBack.onResponse(courses);
+        } catch (IOException e) {
+            e.printStackTrace();
+            callBack.onFailure("Unexpected IO exception", e);
+        }
     }
 
     /**
